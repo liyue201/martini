@@ -18,6 +18,7 @@
 package martini
 
 import (
+	contx "context"
 	"crypto/tls"
 	"github.com/codegangsta/inject"
 	"log"
@@ -32,12 +33,12 @@ import (
 // Martini represents the top level web application. inject.Injector methods can be invoked to map services on a global level.
 type Martini struct {
 	inject.Injector
-	handlers      []Handler
-	action        Handler
-	httpListener  net.Listener
-	httpsListener net.Listener
-	mutex         sync.RWMutex
-	logger        *log.Logger
+	handlers    []Handler
+	action      Handler
+	httpServer  *http.Server
+	httpsServer *http.Server
+	mutex       sync.RWMutex
+	logger      *log.Logger
 }
 
 // New creates a bare bones Martini instance. Use this method if you want to have full control over the middleware that is used.
@@ -89,7 +90,6 @@ func (m *Martini) RunOnAddr(addr string) {
 
 	logger := m.Injector.Get(reflect.TypeOf(m.logger)).Interface().(*log.Logger)
 	logger.Printf("listening on %s (%s)\n", addr, Env)
-	//logger.Fatalln(http.ListenAndServe(addr, m))
 	logger.Println(m.listenAndServe(addr, m))
 }
 
@@ -101,7 +101,6 @@ func (m *Martini) RunOnAddrTLS(addr, certFile, keyFile string) {
 
 	logger := m.Injector.Get(reflect.TypeOf(m.logger)).Interface().(*log.Logger)
 	logger.Printf("listening on %s (%s)\n", addr, Env)
-	//logger.Fatalln(http.ListenAndServe(addr, m))
 	logger.Println(m.listenAndServeTLS(addr, certFile, keyFile, m))
 }
 
@@ -134,7 +133,7 @@ func (m *Martini) listenAndServe(addr string, handler http.Handler) error {
 		return err
 	}
 	m.mutex.Lock()
-	m.httpListener = ln
+	m.httpServer = server
 	m.mutex.Unlock()
 	return server.Serve(tcpKeepAliveListener{ln.(*net.TCPListener)})
 }
@@ -162,14 +161,12 @@ func (m *Martini) listenAndServeTLS(addr, certFile, keyFile string, handler http
 	}
 
 	m.mutex.Lock()
-	m.httpsListener = ln
+	m.httpsServer = server
 	m.mutex.Unlock()
 
 	tlsListener := tls.NewListener(tcpKeepAliveListener{ln.(*net.TCPListener)}, tlscfg)
 
 	return server.Serve(tlsListener)
-
-	//return server.ListenAndServeTLS(certFile, keyFile)
 }
 
 // Run the http server. Listening on os.GetEnv("PORT") or 3000 by default.
@@ -196,15 +193,46 @@ func (m *Martini) RunTLS(certFile, keyFile string) {
 	m.RunOnAddrTLS(host+":"+port, certFile, keyFile)
 }
 
+// Close immediately closes all active net.Listeners and any
+// connections in state StateNew, StateActive, or StateIdle. For a
+// graceful shutdown, use Shutdown.
+//
+// Close does not attempt to close (and does not even know about)
+// any hijacked connections, such as WebSockets.
+//
+// Close returns any error returned from closing the Server's
 func (m *Martini) Stop() {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if m.httpListener != nil {
-		m.httpListener.Close()
+	if m.httpServer != nil {
+		m.httpServer.Close()
 	}
-	if m.httpsListener != nil {
-		m.httpsListener.Close()
+	if m.httpsServer != nil {
+		m.httpsServer.Close()
+	}
+}
+
+// Shutdown gracefully shuts down the server without interrupting any
+// active connections. Shutdown works by first closing all open
+// listeners, then closing all idle connections, and then waiting
+// indefinitely for connections to return to idle and then shut down.
+// If the provided context expires before the shutdown is complete,
+// then the context's error is returned.
+//
+// Shutdown does not attempt to close nor wait for hijacked
+// connections such as WebSockets. The caller of Shutdown should
+// separately notify such long-lived connections of shutdown and wait
+// for them to close, if desired.
+func (m *Martini) Shutdown(ctx contx.Context) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.httpServer != nil {
+		m.httpServer.Shutdown(ctx)
+	}
+	if m.httpsServer != nil {
+		m.httpsServer.Shutdown(ctx)
 	}
 }
 
